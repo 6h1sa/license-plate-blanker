@@ -1,0 +1,13 @@
+[project]
+name = "car-license-plate-remove"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.14"
+dependencies = [
+    "gradio>=6.14.0",
+    "huggingface-hub>=1.15.0",
+    "numpy>=2.4.6",
+    "pillow>=12.2.0",
+    "simple-lama-inpainting>=0.1.0",
+    "ultralytics>=8.4.51",
+]
