@@ -259,15 +259,55 @@ def looks_like_plate(img: np.ndarray, quad: np.ndarray) -> bool:
     return len(tall) >= 1
 
 
+def plate_colors_plausible(bg: np.ndarray, inner: np.ndarray) -> bool:
+    """地色 bg と四角形内の画素 inner (Lab) が日本のナンバーの配色としてあり得るか。
+
+    白・黄（自家用）: 地色が明るい / 緑（事業用）: 緑地に白文字 / 黒（軽事業用）: 黒地に黄文字。
+    黒いグリルやディフューザーなど、暗い地に明るい模様の誤検出を除くため。
+    サンプルでは本物の白・黄ナンバーの地色は日陰でも L≥40、誤検出した黒い部品は L≤16 だった。
+    """
+    L = inner[:, 0]
+    if bg[0] >= 30:
+        return True
+    if bg[1] < -12 and (L > bg[0] + 20).mean() > 0.03:
+        return True
+    if ((L > bg[0] + 20) & (inner[:, 2] > 25)).mean() > 0.03:
+        return True
+    return False
+
+
+def quad_shape_problem(quad: np.ndarray) -> str:
+    """長方形の板を撮影した形としてあり得ない四角形なら理由を返す（問題なければ空文字）。
+
+    プレートの一部だけを拾った三角形に近い当てはめを除く。ナンバーは撮影距離に比べて小さいので、
+    遠近で歪んでも向かい合う辺はほぼ平行になる。
+    """
+    angles = []
+    for i in range(4):
+        a, b = quad[i - 1] - quad[i], quad[(i + 1) % 4] - quad[i]
+        cos = np.dot(a, b) / max(np.linalg.norm(a) * np.linalg.norm(b), 1e-6)
+        angles.append(np.degrees(np.arccos(np.clip(cos, -1, 1))))
+    if not all(40 < a < 140 for a in angles):
+        return f"四隅の角度が不自然 ({min(angles):.0f}°〜{max(angles):.0f}°)"
+    for i in (0, 1):
+        d1 = quad[i + 1] - quad[i]
+        d2 = quad[i + 2] - quad[(i + 3) % 4]
+        cos = abs(np.dot(d1, d2)) / max(np.linalg.norm(d1) * np.linalg.norm(d2), 1e-6)
+        if np.degrees(np.arccos(np.clip(cos, -1, 1))) > 15:
+            return "向かい合う辺が平行でない"
+    return ""
+
+
 def refine_quad(img: np.ndarray, box, work_width: int = 360, strict: bool = True, debug: dict | None = None) -> PlateFit:
     """おおまかな bbox からプレートの正確な四隅を推定する。
 
     1. bbox 中央部の画素を2クラスタに分け、多い方をプレートの地色とする
+       （うまくいかなければ少ない方を地色として再試行。プレート中央に物が付いている場合など）
     2. 地色に近い画素のうち中央と連結した領域 (エッジで切断) をプレート本体とする
     3. 文字の穴を埋めた輪郭を4辺にフィット
     4. 原寸で輝度勾配に沿って各辺をサブピクセル補正
 
-    strict=False（手動指定時）は文字配置のチェックを省く。
+    strict=False（手動指定時）は配色と文字配置のチェックを省く。
     """
     H, W = img.shape[:2]
     x1, y1, x2, y2 = [float(v) for v in box]
@@ -293,14 +333,134 @@ def refine_quad(img: np.ndarray, box, work_width: int = 360, strict: bool = True
         fail.reason = "bbox が小さすぎます"
         return fail
     centers, labels, counts = _kmeans2(samples)
-    bg_i = int(np.argmax(counts))
-    bg, fg = centers[bg_i], centers[1 - bg_i]
-    contrast = float(np.linalg.norm((bg - fg) * [1, 1, 1]))
-    if contrast < 15:
+    if float(np.linalg.norm(centers[0] - centers[1])) < 15:
         fail.reason = "文字と地色のコントラストが不足"
         return fail
+
+    first_reason = None
+    for bg_i in np.argsort(-counts):
+        bg, fg = centers[bg_i], centers[1 - bg_i]
+        quad, reason = _fit_plate_region(lab, seed, samples[labels == bg_i], bg, fg, strict, debug)
+        if quad is not None:
+            break
+        first_reason = first_reason or reason
+    else:
+        fail.reason = first_reason
+        return fail
+
+    # --- 原寸で辺を詰める
+    quad_full = quad / s + [cx1, cy1]
+    gray = cv2.cvtColor(img[cy1:cy2, cx1:cx2], cv2.COLOR_RGB2GRAY).astype(np.float32)
+    gray = cv2.GaussianBlur(gray, (0, 0), max(0.8, 0.5 / s))
+    search = max(3.0, 4.0 / s)
+    refined = _refine_edges(gray, (quad_full - [cx1, cy1]).astype(np.float32), search) + [cx1, cy1]
+    if not quad_shape_problem(refined):
+        quad_full = refined
+
+    if strict and not looks_like_plate(img, quad_full):
+        return PlateFit(quad_full.astype(np.float32), False, "ナンバーの文字配置に見えない")
+
+    bg_rgb = cv2.cvtColor(bg.reshape(1, 1, 3).astype(np.float32), cv2.COLOR_LAB2RGB).ravel()
+    return PlateFit(quad_full.astype(np.float32), True, "", tuple(int(c) for c in np.clip(bg_rgb * 255, 0, 255)))
+
+
+def _apparent_aspect(quad: np.ndarray) -> float:
+    top = np.linalg.norm(quad[1] - quad[0])
+    bottom = np.linalg.norm(quad[2] - quad[3])
+    left = np.linalg.norm(quad[3] - quad[0])
+    right = np.linalg.norm(quad[2] - quad[1])
+    return float((top + bottom) / max(left + right, 1e-6))
+
+
+def _extend_quad(lab: np.ndarray, quad: np.ndarray, bg: np.ndarray, fg: np.ndarray) -> np.ndarray:
+    """影などで地色が変わり切り落とされた端を、外側へ伸ばして取り戻す。
+
+    正面化した座標で各辺の外側を1行（列）ずつ見て、地色か文字色に近い画素が大半なら
+    プレートの続きとみなす。明るさの差に寛容にするため L の重みを下げて比較する。
+    伸ばした結果、縦横比が本来の 1:2 に近づく場合だけ採用する。
+    """
+    quad = order_quad(quad)
+    rw, rh = 200, 100
+    ey, ex = 0.5, 0.15  # 探索する外側の幅（縦: 高さ比、横: 幅比）
+    oy, ox = int(rh * ey), int(rw * ex)
+    dst = np.array([[ox, oy], [ox + rw, oy], [ox + rw, oy + rh], [ox, oy + rh]], np.float32)
+    M = cv2.getPerspectiveTransform(quad.astype(np.float32), dst)
+    big = cv2.warpPerspective(lab, M, (rw + 2 * ox, rh + 2 * oy), flags=cv2.INTER_LINEAR, borderValue=(0, 0, 0))
+    valid = cv2.warpPerspective(np.ones(lab.shape[:2], np.float32), M, (rw + 2 * ox, rh + 2 * oy), borderValue=0) > 0.5
+    thr = max(6.0, 0.4 * float(_color_dist(fg[None, None], bg, 0.25)[0, 0]))
+    like = ((_color_dist(big, bg, 0.25) < thr) | (_color_dist(big, fg, 0.25) < thr)) & valid
+    bglike = (_color_dist(big, bg, 0.25) < thr) & valid
+
+    def walk(lines_like, lines_bg, start, step, limit):
+        last, miss = start, 0
+        for i in range(start, limit, step):
+            if lines_like[i] >= 0.75 and lines_bg[i] >= 0.3:
+                last, miss = i, 0
+            else:
+                miss += 1
+                if miss >= 2:
+                    break
+        return last
+
+    cx = slice(ox + int(rw * 0.1), ox + int(rw * 0.9))
+    cy = slice(oy + int(rh * 0.1), oy + int(rh * 0.9))
+    row_like, row_bg = like[:, cx].mean(1), bglike[:, cx].mean(1)
+    col_like, col_bg = like[cy, :].mean(0), bglike[cy, :].mean(0)
+    top = walk(row_like, row_bg, oy, -1, -1)
+    bottom = walk(row_like, row_bg, oy + rh - 1, 1, rh + 2 * oy) + 1
+    left = walk(col_like, col_bg, ox, -1, -1)
+    right = walk(col_like, col_bg, ox + rw - 1, 1, rw + 2 * ox) + 1
+    Minv = np.linalg.inv(M)
+
+    def back(l, t, r, b):
+        rect = np.array([[l, t], [r, t], [r, b], [l, b]], np.float32)
+        return cv2.perspectiveTransform(rect[None], Minv)[0]
+
+    def err(q):
+        return abs(np.log(_apparent_aspect(q) / PLATE_ASPECT))
+
+    if (top, bottom, left, right) != (oy, oy + rh, ox, ox + rw):
+        cand = back(left, top, right, bottom)
+        if err(cand) < err(quad) - 0.05:
+            quad, top, bottom = cand, top, bottom
+        else:
+            top, bottom, left, right = oy, oy + rh, ox, ox + rw
+
+    # 濃い影で上下の帯が地色と大きく違う場合: 縦横比が横長すぎるなら、上下に「外側が暗くなる」強いエッジを探し、
+    # 1:2 に戻る位置まで伸ばす
+    if _apparent_aspect(quad) > PLATE_ASPECT * 1.18:
+        prof = np.median(big[:, cx, 0], axis=1)
+        prof = np.convolve(prof, np.ones(3) / 3, mode="same")
+        k = 3
+
+        def edge_strength(r, inside_below):
+            if r - k < 0 or r + k > len(prof):
+                return 0.0
+            a, b = prof[r:r + k].mean(), prof[r - k:r].mean()
+            return (a - b) if inside_below else (b - a)
+
+        tops = [(top, np.inf)] + [(r, edge_strength(r, True)) for r in range(k, top - 2)]
+        bots = [(bottom, np.inf)] + [(r, edge_strength(r, False)) for r in range(bottom + 2, len(prof) - k)]
+        tops = [t for t in tops if t[1] > 8]
+        bots = [b for b in bots if b[1] > 8]
+        best, best_score = None, err(quad)
+        for t, st in tops:
+            for b, sb in bots:
+                if (t, b) == (top, bottom):
+                    continue
+                cand = back(left, t, right, b)
+                e = err(cand)
+                if e < 0.12 and e < best_score - 0.1:
+                    best, best_score = cand, e
+        if best is not None:
+            quad = best
+    return quad
+
+
+def _fit_plate_region(lab, seed, bg_samples, bg, fg, strict=True, debug=None) -> tuple[np.ndarray | None, str]:
+    """地色 bg の連結領域を探して四隅をフィットし、妥当性を確認する。(quad, 失敗理由) を返す。"""
+    sh, sw = lab.shape[:2]
     # 地色クラスタのばらつきから許容距離を決める
-    bg_samples = samples[labels == bg_i]
     spread = np.percentile(_color_dist(bg_samples[None], bg)[0], 90)
     thr = float(np.clip(max(spread * 1.6, 0.35 * _color_dist(fg[None, None], bg)[0, 0]), 6, 40))
 
@@ -316,8 +476,7 @@ def refine_quad(img: np.ndarray, box, work_width: int = 360, strict: bool = True
 
     n, lbl, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=4)
     if n <= 1:
-        fail.reason = "プレート領域が見つかりません"
-        return fail
+        return None, "プレート領域が見つかりません"
     overlap = np.bincount(lbl[seed > 0].ravel(), minlength=n)
     overlap[0] = 0
     k = int(np.argmax(overlap))
@@ -331,16 +490,14 @@ def refine_quad(img: np.ndarray, box, work_width: int = 360, strict: bool = True
 
     quad = _fit_quad_to_contour(cnt)
     if debug is not None:
-        debug.update(small=small, mask=mask, blob=filled, quad=quad, bg=bg, fg=fg, thr=thr)
+        debug.update(mask=mask, blob=filled, quad=quad, bg=bg, fg=fg, thr=thr)
     if quad is None:
-        fail.reason = "四角形フィット失敗"
-        return fail
+        return None, "四角形フィット失敗"
 
     # --- 妥当性チェック
     qarea = cv2.contourArea(quad)
     if qarea < 100:
-        fail.reason = "領域が小さすぎます"
-        return fail
+        return None, "領域が小さすぎます"
     fill_ratio = filled.sum() / qarea
     top = np.linalg.norm(quad[1] - quad[0])
     bottom = np.linalg.norm(quad[2] - quad[3])
@@ -348,37 +505,30 @@ def refine_quad(img: np.ndarray, box, work_width: int = 360, strict: bool = True
     right = np.linalg.norm(quad[2] - quad[1])
     aspect = (top + bottom) / max(left + right, 1e-6)
     if not cv2.isContourConvex(quad.astype(np.float32).reshape(-1, 1, 2)):
-        fail.reason = "四角形が凸でない"
-        return fail
+        return None, "四角形が凸でない"
+    shape_reason = quad_shape_problem(quad)
+    if shape_reason:
+        return None, shape_reason
     if fill_ratio < 0.8:
-        fail.reason = f"四角形への当てはまりが悪い ({fill_ratio:.2f})"
-        return fail
+        return None, f"四角形への当てはまりが悪い ({fill_ratio:.2f})"
+    # 当てはまりを確認してから、影で切り落とされた端を伸ばす
+    quad = _extend_quad(lab, quad, bg, fg)
     if not (0.5 < aspect < 3.2):
-        fail.reason = f"縦横比が不自然 ({aspect:.2f})"
-        return fail
+        return None, f"縦横比が不自然 ({aspect:.2f})"
     poly = np.zeros((sh, sw), np.uint8)
     cv2.fillConvexPoly(poly, quad.astype(np.int32), 1)
     poly = cv2.erode(poly, np.ones((5, 5), np.uint8))
     inner = lab[poly > 0]
+    if len(inner) < 50:
+        return None, "領域が小さすぎます"
     # 四角形の内側だけで改めて2クラスタに分け、少数側（文字）の割合を見る
-    _, _, cnt2 = _kmeans2(inner[:: max(1, len(inner) // 20000)])
+    c2, _, cnt2 = _kmeans2(inner[:: max(1, len(inner) // 20000)])
     char_ratio = float(cnt2.min() / cnt2.sum())
     if not (0.04 < char_ratio < 0.6):
-        fail.reason = f"文字領域の比率が不自然 ({char_ratio:.2f})"
-        return fail
-
-    # --- 原寸で辺を詰める
-    quad_full = quad / s + [cx1, cy1]
-    gray = cv2.cvtColor(img[cy1:cy2, cx1:cx2], cv2.COLOR_RGB2GRAY).astype(np.float32)
-    gray = cv2.GaussianBlur(gray, (0, 0), max(0.8, 0.5 / s))
-    search = max(3.0, 4.0 / s)
-    quad_full = _refine_edges(gray, (quad_full - [cx1, cy1]).astype(np.float32), search) + [cx1, cy1]
-
-    if strict and not looks_like_plate(img, quad_full):
-        return PlateFit(quad_full.astype(np.float32), False, "ナンバーの文字配置に見えない")
-
-    bg_rgb = cv2.cvtColor(bg.reshape(1, 1, 3).astype(np.float32), cv2.COLOR_LAB2RGB).ravel()
-    return PlateFit(quad_full.astype(np.float32), True, "", tuple(int(c) for c in np.clip(bg_rgb * 255, 0, 255)))
+        return None, f"文字領域の比率が不自然 ({char_ratio:.2f})"
+    if strict and not plate_colors_plausible(c2[int(np.argmax(cnt2))], inner):
+        return None, "ナンバーの配色ではない"
+    return quad, ""
 
 
 # ---------------------------------------------------------------------------
