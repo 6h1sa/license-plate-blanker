@@ -12,3 +12,4 @@ wheels/
 *.log
 
 sample_picture/
+output/
