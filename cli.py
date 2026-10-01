@@ -15,6 +15,7 @@ def main():
     ap.add_argument("-o", "--outdir", default="output", help="出力ディレクトリ（既定: output）")
     ap.add_argument("--conf", type=float, default=0.1, help="検出スコアの下限")
     ap.add_argument("--margin", type=float, default=3.5, help="縁として残す幅（プレート高さに対する %%）")
+    ap.add_argument("--format", choices=list(plate.SAVE_FORMATS), default="jpeg", help="保存形式（既定: jpeg）")
     ap.add_argument("--preview", action="store_true", help="検出結果を描いたプレビュー画像も保存する")
     args = ap.parse_args()
 
@@ -26,11 +27,12 @@ def main():
         stem = os.path.splitext(os.path.basename(path))[0]
         print(f"{path}: {len(ok)} 枚処理" + "".join(f"\n  除外: スコア {c.score:.2f} {c.reason}" for c in cands if not c.ok))
         out = plate.erase_all(img, [c.quad for c in ok], margin=args.margin / 100)
-        plate.save_image(os.path.join(args.outdir, f"{stem}_noplate.jpg"), out, exif)
+        ext = plate.SAVE_FORMATS[args.format]
+        plate.save_image(os.path.join(args.outdir, f"{stem}_noplate{ext}"), out, exif)
         if args.preview:
             colors = [(0, 255, 0) if c.ok else (255, 60, 60) for c in cands]
             vis = plate.draw_quads(img, [c.quad for c in cands], [f"#{i + 1}" for i in range(len(cands))], colors)
-            plate.save_image(os.path.join(args.outdir, f"{stem}_preview.jpg"), vis)
+            plate.save_image(os.path.join(args.outdir, f"{stem}_preview{ext}"), vis)
 
 
 if __name__ == "__main__":

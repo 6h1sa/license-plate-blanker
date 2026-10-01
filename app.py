@@ -15,6 +15,9 @@ import plate
 MODE_BOX = "矩形（2点クリック → 四隅を自動推定）"
 MODE_QUAD = "四隅（4点クリック → そのまま使用）"
 
+# UI の表示名 → plate.SAVE_FORMATS のキー
+FORMATS = {"JPEG": "jpeg", "WebP": "webp"}
+
 OK_COLOR = (0, 255, 0)
 NG_COLOR = (255, 60, 60)
 OFF_COLOR = (150, 150, 150)
@@ -117,7 +120,7 @@ def on_remove_unselected(data, cands, selected):
     return _render(data["img"], cands, labels, []), cands, gr.update(choices=labels, value=labels)
 
 
-def on_erase(data, cands, selected, margin):
+def on_erase(data, cands, selected, margin, fmt):
     if data is None:
         gr.Warning("画像を読み込んでください")
         return None, None
@@ -127,8 +130,12 @@ def on_erase(data, cands, selected, margin):
         gr.Warning("処理するプレートが選択されていません")
         return None, None
     out = plate.erase_all(data["img"], quads, margin=margin / 100)
-    path = os.path.join(tempfile.mkdtemp(), f"{data['name']}_noplate.jpg")
-    plate.save_image(path, out, data["exif"])
+    path = os.path.join(tempfile.mkdtemp(), f"{data['name']}_noplate{plate.SAVE_FORMATS[FORMATS[fmt]]}")
+    try:
+        plate.save_image(path, out, data["exif"])
+    except ValueError as e:
+        gr.Warning(str(e))
+        return out, None
     return out, path
 
 
@@ -151,11 +158,12 @@ with gr.Blocks(title="ナンバープレート消去") as demo:
             mode = gr.Radio([MODE_BOX, MODE_QUAD], value=MODE_BOX, label="手動追加の方法（プレビューをクリック）")
             clear_btn = gr.Button("クリック点をリセット", size="sm")
             margin = gr.Slider(0, 8, value=3.5, step=0.5, label="縁として残す幅（プレート高さに対する %）")
+            fmt = gr.Radio(list(FORMATS), value="JPEG", label="保存形式")
             erase_btn = gr.Button("文字を消去", variant="primary")
         with gr.Column(scale=2):
             preview = gr.Image(label="検出プレビュー（クリックで手動追加）", type="numpy", interactive=False)
             output_img = gr.Image(label="結果", type="numpy", interactive=False)
-            output_file = gr.File(label="ダウンロード（元の解像度・EXIF 付き JPEG）")
+            output_file = gr.File(label="ダウンロード（元の解像度・EXIF 付き）")
 
     input_img.change(
         on_upload,
@@ -171,7 +179,7 @@ with gr.Blocks(title="ナンバープレート消去") as demo:
     clear_btn.click(on_clear_clicks, inputs=[data_state, cands_state, selected], outputs=[preview, clicks_state])
     mode.change(on_clear_clicks, inputs=[data_state, cands_state, selected], outputs=[preview, clicks_state])
     remove_btn.click(on_remove_unselected, inputs=[data_state, cands_state, selected], outputs=[preview, cands_state, selected])
-    erase_btn.click(on_erase, inputs=[data_state, cands_state, selected, margin], outputs=[output_img, output_file])
+    erase_btn.click(on_erase, inputs=[data_state, cands_state, selected, margin, fmt], outputs=[output_img, output_file])
 
 if __name__ == "__main__":
     demo.launch(server_port=7900)
