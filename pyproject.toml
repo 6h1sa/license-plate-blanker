@@ -14,3 +14,17 @@ dependencies = [
     "pillow>=12.2.0",
     "ultralytics>=8.4.51",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+# 手元のサンプル写真を使う回帰チェックは時間がかかるので、明示したときだけ実行する
+addopts = "-m 'not samples'"
+markers = [
+    "samples: sample_picture/ の実写真で結果が基準から変わっていないか確認する（uv run pytest -m samples）",
+]

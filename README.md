@@ -21,6 +21,18 @@ UI では自動検出の結果を確認し、見落としはプレビューを�
 3. **文字消去**: プレートを射影変換で正面化し、文字を除いた画素から照明ムラ込みの地色面を推定、
    元画像相当の粒状ノイズを乗せて置き換え、逆射影して合成。縁の帯は元画像を残す
 
+## テスト
+
+```bash
+uv run pytest                                # 単体テスト（合成画像のみ・数秒）
+uv run pytest -m samples                     # sample_picture/ の実写真で、結果が基準から変わっていないか確認（数分）
+uv run pytest -m samples --update-baseline   # 今の結果を基準として保存（意図して結果を変えたとき）
+uv run review.py sample_picture -o review    # 全サンプルの処理前後を並べた比較画像を出力（目視確認用）
+```
+
+サンプル写真と基準ファイル（`.regression/`）は他人の車が写るため、リポジトリには入れていません。
+どちらかが無い環境では、実写真のチェックはスキップされます。
+
 ## ライセンス
 
 [AGPL-3.0](LICENSE)。依存する Ultralytics と検出モデル `morsetechlab/yolov11-license-plate-detection`
