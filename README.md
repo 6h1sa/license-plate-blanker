@@ -24,7 +24,7 @@ Web UI では、写真をドラッグ&ドロップする（複数可）と、検
 
 ## 処理の流れ（plate/）
 
-1. **検出**: YOLOv11 のナンバープレート検出モデルを 50% 重なりのタイルで実行（高解像度写真の小さいプレート対策）
+1. **検出**: YOLOv11 のナンバープレート検出モデル（ONNX 版を onnxruntime で実行）を 50% 重なりのタイルで実行（高解像度写真の小さいプレート対策）
 2. **四隅推定**: bbox 内の地色を推定 → 地色領域の輪郭を4辺に直線フィット → 原寸の輝度勾配で各辺をサブピクセル補正。
    縦横比・文字領域の比率・下段の大きな数字の有無で誤検出を除外
 3. **文字消去**: プレートを射影変換で正面化し、文字を除いた画素から照明ムラ込みの地色面を推定、
@@ -68,6 +68,6 @@ uv run review.py sample_picture -o review    # 全サンプルの処理前後を
 
 ## ライセンス
 
-[AGPL-3.0](LICENSE)。依存する Ultralytics と検出モデル `morsetechlab/yolov11-license-plate-detection`
+[AGPL-3.0](LICENSE)。検出モデル `morsetechlab/yolov11-license-plate-detection`（Ultralytics YOLOv11 で学習）
 が AGPL-3.0 のため、それに合わせています。Web UI をネットワーク越しに他者へ公開する場合も、
 AGPL に従いソースコードを提供する必要があります。
