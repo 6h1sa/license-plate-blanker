@@ -18,7 +18,7 @@ import plate
 
 SAMPLE_DIR = "sample_picture"
 BASELINE = os.path.join(".regression", "baseline.json")
-EXTS = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp")
+EXTS = plate.IMAGE_EXTS
 
 pytestmark = pytest.mark.samples
 

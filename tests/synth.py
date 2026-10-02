@@ -20,13 +20,19 @@ SEAL_L = (int(PLATE_W * 0.17), int(PLATE_H * 0.14))
 RIM = 5  # 縁のエンボスの線の、外周からの距離
 
 
-def plate_image(bg=WHITE, text=DARK_TEXT, shadow: float = 0.0, hardware: bool = False) -> np.ndarray:
+BOLT_L = (int(PLATE_W * 0.18), int(PLATE_H * 0.15))
+
+
+def plate_image(bg=WHITE, text=DARK_TEXT, shadow: float = 0.0, hardware: bool = False, lone_bolt: bool = False) -> np.ndarray:
     """正面から見たプレート (RGB)。
 
     shadow > 0 なら上部にその濃さの横帯の影を落とす。
     hardware なら、右に黒いボルト、左に金属の封印、外周に沿ってエンボスの細い線を描く。
+    lone_bolt なら、左のボルトの位置にだけ黒い丸を描く（右には何も無い）。
     """
     img = np.full((PLATE_H, PLATE_W, 3), bg, np.uint8)
+    if lone_bolt:
+        cv2.circle(img, BOLT_L, 6, (25, 25, 25), -1, cv2.LINE_AA)
     if hardware:
         rim = tuple(int(c * 0.72) for c in bg)
         cv2.rectangle(img, (RIM, RIM), (PLATE_W - 1 - RIM, PLATE_H - 1 - RIM), rim, 2, cv2.LINE_AA)

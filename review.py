@@ -17,7 +17,7 @@ import numpy as np
 
 import plate
 
-EXTS = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp")
+EXTS = plate.IMAGE_EXTS
 SHEET_W = 1600
 CROP_H = 260
 

@@ -6,7 +6,7 @@ import pytest
 from PIL import Image
 
 import plate
-from synth import BOLT_R, FRONT, GREEN, OBLIQUE, PLATE_H, PLATE_W, RIM, SEAL_L, WHITE, WHITE_TEXT, YELLOW, bbox_of, plate_image, rectify, scene
+from synth import BOLT_L, BOLT_R, FRONT, GREEN, OBLIQUE, PLATE_H, PLATE_W, RIM, SEAL_L, WHITE, WHITE_TEXT, YELLOW, bbox_of, plate_image, rectify, scene
 
 
 def corner_error(a, b) -> float:
@@ -159,6 +159,15 @@ def test_erase_plate_keeps_bolts_seal_and_rim(quad):
     # 文字は消える
     dev = np.abs(after[int(PLATE_H * 0.55):int(PLATE_H * 0.85), int(PLATE_W * 0.12):int(PLATE_W * 0.88)] - np.array(WHITE, np.float32)).max(axis=-1)
     assert np.percentile(dev, 99.5) < 30
+
+
+def test_erase_plate_paints_over_lone_bolt():
+    # 片方しかボルトが無ければ、無理に残さず塗る
+    img, _ = scene(FRONT, plate_image(lone_bolt=True))
+    after = rectify(plate.erase_plate(img, np.float32(FRONT)), FRONT).astype(np.float32)
+    x, y = BOLT_L
+    patch = after[y - 3:y + 4, x - 3:x + 4]
+    assert float(np.abs(patch - np.array(WHITE, np.float32)).max(axis=-1).mean()) < 20
 
 
 # ---------------------------------------------------------------------------
