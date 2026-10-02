@@ -79,6 +79,16 @@ def test_refine_quad_finds_corners(quad, bg, text):
     assert corner_error(fit.quad, quad) < 3.0
 
 
+@pytest.mark.parametrize("rim", [5, 10])
+@pytest.mark.parametrize("quad", [FRONT, OBLIQUE], ids=["front", "oblique"])
+def test_refine_quad_reaches_outer_edge_past_rim_line(quad, rim):
+    # 縁のエンボスの段差の線（外周の少し内側の暗い線）ではなく、板の外周を四隅とする
+    img, _ = scene(quad, plate_image(hardware=True, rim=rim))
+    fit = plate.refine_quad(img, bbox_of(quad))
+    assert fit.ok, fit.reason
+    assert corner_error(fit.quad, quad) < 3.0
+
+
 def test_refine_quad_recovers_edge_cut_by_shadow():
     # 上部に濃い影が落ちていても、四角形は影の部分まで含む
     quad = FRONT

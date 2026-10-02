@@ -225,8 +225,8 @@ export const Viewer = forwardRef<ViewerHandle, Props>(function Viewer(props, ref
   }, [dpr]);
 
   const cursor = tool ? "crosshair" : hoverCorner >= 0 ? "move" : "default";
-  const hint = tool === "box" ? "ナンバーをドラッグで囲んでください（Esc で取り消し）"
-    : tool === "quad" ? `ナンバーの四隅をクリック（${quadPoints.length}/4、Esc で取り消し）` : null;
+  const hint = tool === "box" ? "ナンバー全体が入るよう、少し外側までドラッグで囲んでください（Esc で取り消し）"
+    : tool === "quad" ? `板の外周の角をクリック（${quadPoints.length}/4、Esc で取り消し）` : null;
 
   return (
     <>

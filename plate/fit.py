@@ -75,6 +75,7 @@ def refine_quad(img: np.ndarray, box, work_width: int = 360, strict: bool = True
         from_edges = True
 
     quad_full = _snap_full_res(img, quad / s + [cx1, cy1], (cx1, cy1, cx2, cy2), s)
+    quad_full = _expand_to_outer_edge(img, quad_full, bg)
 
     # 写真の端に接する（端で切れた）プレートは四隅を正しく決められないので、自動では処理しない（手動指定は可）
     over = max(2.0, 0.01 * float(np.linalg.norm(quad_full[1] - quad_full[0])))
@@ -149,6 +150,78 @@ def _snap_full_res(img, quad_full, crop, s):
     if not quad_shape_problem(refined):
         quad_full = refined
     return quad_full
+
+
+# 板の実寸（mm）。縁のエンボスの段差は外周から約 10mm 内側にある（実写真の実測）
+PLATE_MM = (330.0, 165.0)
+RIM_MM = (4.0, 16.0)  # 内側の四角形を 330mm とみなして換算するので、実際より少し大きく出る
+
+
+def _expand_to_outer_edge(img: np.ndarray, quad: np.ndarray, bg: np.ndarray) -> np.ndarray:
+    """辺が縁のエンボスの段差の線に乗っていたら、板の外周まで広げる。
+
+    段差の影の線は外周より強いエッジとして写るので、四隅の推定が外周の約 10mm 内側に止まることがある。
+    辺ごとに外側を調べ、地色と同じ色の帯（縁）が RIM_MM の範囲で途切れていれば、その先の輝度の変化まで広げる。
+    帯がもっと先まで続く（車体も同じ色で区別できない）ときは広げない。
+    """
+    quad = order_quad(quad)
+    width_px = float(np.linalg.norm(quad[1] - quad[0]) + np.linalg.norm(quad[2] - quad[3])) / 2
+    k = float(np.clip(width_px / PLATE_MM[0], 1.0, 4.0))  # 1mm あたりの画素数（正面化後）
+    margin = 20.0  # 外側に見る幅 (mm)
+    W, H = PLATE_MM[0] * k, PLATE_MM[1] * k
+    o = margin * k
+    dst = np.float32([[o, o], [o + W, o], [o + W, o + H], [o, o + H]])
+    M = cv2.getPerspectiveTransform(quad.astype(np.float32), dst)
+    size = (int(round(W + 2 * o)), int(round(H + 2 * o)))
+    rect = cv2.warpPerspective(img, M, size, flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    lab = _to_lab(cv2.GaussianBlur(rect, (0, 0), max(0.6, 0.3 * k)))
+    near = _color_dist(lab, bg, 0.3) < 8.0
+    gray = cv2.cvtColor(rect, cv2.COLOR_RGB2GRAY).astype(np.float32)
+    clip_r = lambda i: int(np.clip(i, 0, size[1] - 1))
+    clip_c = lambda i: int(np.clip(i, 0, size[0] - 1))
+
+    def outward(side: str) -> float:
+        """side の辺を外側へ広げる量 (mm)。広げないなら 0。"""
+        n = int(round(margin * k))
+        if side in ("top", "bottom"):
+            cols = slice(int(o + 0.15 * W), int(o + 0.85 * W))
+            idx = [clip_r(round(o - i)) for i in range(-int(6 * k), n)] if side == "top" else                   [clip_r(round(o + H + i)) for i in range(-int(6 * k), n)]
+            like = np.array([near[r, cols].mean() for r in idx])
+            lum = np.array([np.median(gray[r, cols]) for r in idx])
+        else:
+            rows = slice(int(o + 0.15 * H), int(o + 0.85 * H))
+            idx = [clip_c(round(o - i)) for i in range(-int(6 * k), n)] if side == "left" else                   [clip_c(round(o + W + i)) for i in range(-int(6 * k), n)]
+            like = np.array([near[rows, c].mean() for c in idx])
+            lum = np.array([np.median(gray[rows, c]) for c in idx])
+        z = int(6 * k)  # idx の中で今の辺の位置
+        if like[: z - int(1.5 * k)].mean() < 0.6:
+            return 0.0  # 内側がそもそも地色でない（影など）
+        # 外へ向かって地色の帯をたどる。段差の影の細い線（2.5mm まで）は切れ目として許す
+        last, gap = z, 0
+        for i in range(z, len(like)):
+            if like[i] >= 0.6:
+                last, gap = i, 0
+            else:
+                gap += 1
+                if gap > 2.5 * k:
+                    break
+        else:
+            return 0.0  # 見る範囲の端まで地色が続く（車体と区別できない）
+        ext = (last - z) / k
+        if not (RIM_MM[0] <= ext <= RIM_MM[1]):
+            return 0.0
+        # 帯の終わりの近くで、輝度の変化が最も強い位置を外周とする
+        lo, hi = max(z, last - int(1.5 * k)), min(len(lum) - 1, last + int(2 * k))
+        g = np.abs(np.diff(lum[lo:hi + 1]))
+        edge = lo + int(np.argmax(g)) + 0.5 if g.size else last
+        return float(np.clip((edge - z) / k, RIM_MM[0] - 1, RIM_MM[1] + 1))
+
+    t, r, b, l = (outward(sd) for sd in ("top", "right", "bottom", "left"))
+    if t == r == b == l == 0:
+        return quad
+    new = np.float32([[o - l * k, o - t * k], [o + W + r * k, o - t * k], [o + W + r * k, o + H + b * k], [o - l * k, o + H + b * k]])
+    out = cv2.perspectiveTransform(new[None], np.linalg.inv(M))[0]
+    return out if not quad_shape_problem(out) else quad
 
 
 def _extend_quad(lab: np.ndarray, quad: np.ndarray, bg: np.ndarray, fg: np.ndarray) -> np.ndarray:
