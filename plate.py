@@ -440,10 +440,13 @@ def _extend_quad(lab: np.ndarray, quad: np.ndarray, bg: np.ndarray, fg: np.ndarr
             a, b = prof[r:r + k].mean(), prof[r - k:r].mean()
             return (a - b) if inside_below else (b - a)
 
-        tops = [(top, np.inf)] + [(r, edge_strength(r, True)) for r in range(k, top - 2)]
-        bots = [(bottom, np.inf)] + [(r, edge_strength(r, False)) for r in range(bottom + 2, len(prof) - k)]
-        tops = [t for t in tops if t[1] > 8]
-        bots = [b for b in bots if b[1] > 8]
+        def peaks(rows, inside_below):
+            # エッジ強度が局所最大の行だけを候補にする（強いエッジの手前・奥で止まらないよう）
+            st = {r: edge_strength(r, inside_below) for r in range(rows.start - 1, rows.stop + 1)}
+            return [(r, st[r]) for r in rows if st[r] > 8 and st[r] >= st[r - 1] and st[r] >= st[r + 1]]
+
+        tops = [(top, np.inf)] + peaks(range(k + 1, top - 2), True)
+        bots = [(bottom, np.inf)] + peaks(range(bottom + 2, len(prof) - k - 1), False)
         best, best_score = None, err(quad)
         for t, st in tops:
             for b, sb in bots:
@@ -545,12 +548,43 @@ def _normalized_blur(img: np.ndarray, mask: np.ndarray, sigma: float) -> np.ndar
     return num / np.maximum(den, 1e-4)
 
 
+def _shadow_ratio(rect: np.ndarray, base: np.ndarray, rh: int) -> np.ndarray:
+    """正面化したプレート rect (RGB float) に落ちた影を、無地の地色面 base に対する明るさの比 (H, W, 3) で返す。
+
+    文字より太いカーネルでクロージングすると、細い文字は消え、帯状の影は残る。
+    残った暗い領域のうち、小さいもの（文字が交わる部分など）と、プレートの辺の大部分に沿っていないもの
+    （ぼやけて帯状につながった文字列、端の近くの数字など）は影とみなさない。
+    影の中の漢字のように文字が密集した部分は円形カーネルでは消えないので、横長のカーネルでも
+    クロージングして明るい方を取る（バンパーの影は横方向の帯になるため、横に長いカーネルでも残る）。
+    """
+    k = max(5, int(rh * 0.13) | 1)
+    closed = cv2.morphologyEx(rect, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    kh = max(9, int(rh * 0.5) | 1)
+    closed_h = cv2.morphologyEx(rect, cv2.MORPH_CLOSE, np.ones((1, kh), np.uint8))
+    closed = np.maximum(closed, closed_h)
+    closed = cv2.GaussianBlur(closed, (0, 0), max(1.0, rh * 0.01))
+    ratio = np.clip(closed / np.maximum(base, 1.0), 0, 1)
+    dark = (ratio.mean(-1) < 0.92).astype(np.uint8)
+    n, lbl, stats, _ = cv2.connectedComponentsWithStats(dark)
+    H, W = dark.shape
+    e = max(2, int(rh * 0.03))
+    x, y, w, h, area = stats[:, 0], stats[:, 1], stats[:, 2], stats[:, 3], stats[:, 4]
+    # 外から落ちる影はプレートの端から始まり、その辺の大部分にかかる。
+    # ぼやけて帯状につながった文字列（内側にある）や、端の近くにある数字（辺の一部だけ）と区別する
+    along_top_bottom = ((y <= e) | (y + h >= H - e)) & (w >= 0.6 * W)
+    along_left_right = ((x <= e) | (x + w >= W - e)) & (h >= 0.85 * H)
+    keep = (area >= 0.03 * dark.size) & (along_top_bottom | along_left_right)
+    keep[0] = False
+    shadow = cv2.GaussianBlur(keep[lbl].astype(np.float32), (0, 0), max(1.0, rh * 0.008))[..., None]
+    return 1 - (1 - ratio) * shadow
+
+
 def erase_plate(img: np.ndarray, quad: np.ndarray, margin: float = 0.035, seed: int = 0) -> np.ndarray:
     """四隅で指定されたプレートの文字・ボルト等を消し、無地の板にする。
 
     プレートを正面化し、文字を除いた地色画素から照明ムラを含む滑らかな地色面を推定、
     元画像相当の粒状ノイズを乗せて内側を置き換え、逆射影で合成する。
-    縁の帯 (margin) は元画像を残し、そこにかかった文字だけを置き換える。
+    バンパーなどの影は残す。縁の帯 (margin) は元画像を残し、そこにかかった文字だけを置き換える。
     """
     quad = order_quad(quad)
     out = img.copy()
@@ -600,7 +634,9 @@ def erase_plate(img: np.ndarray, quad: np.ndarray, margin: float = 0.035, seed: 
     noise /= max(float(noise.std()), 1e-6)
     synth_lab = surface + noise * noise_std.astype(np.float32)
     synth = cv2.cvtColor(synth_lab.astype(np.float32), cv2.COLOR_LAB2RGB)
-    synth = np.clip(synth * 255, 0, 255)
+    # 影は消さずに再現する（文字と一緒に明るく塗ると板が大きく見える）
+    base = cv2.cvtColor(surface.astype(np.float32), cv2.COLOR_LAB2RGB) * 255
+    synth = np.clip(synth * 255 * _shadow_ratio(rect.astype(np.float32), base, rh), 0, 255)
 
     # 合成マスク: 内側はすべて置き換え、縁の帯は文字（地色から外れた画素）のみ
     m = int(round(rh * margin))
