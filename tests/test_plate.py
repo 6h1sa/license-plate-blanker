@@ -6,7 +6,7 @@ import pytest
 from PIL import Image
 
 import plate
-from synth import FRONT, GREEN, OBLIQUE, WHITE, WHITE_TEXT, YELLOW, bbox_of, plate_image, rectify, scene
+from synth import BOLT_R, FRONT, GREEN, OBLIQUE, PLATE_H, PLATE_W, RIM, SEAL_L, WHITE, WHITE_TEXT, YELLOW, bbox_of, plate_image, rectify, scene
 
 
 def corner_error(a, b) -> float:
@@ -140,6 +140,27 @@ def test_erase_plate_adds_no_shadow_to_evenly_lit_plate():
     assert rows.min() / rows.max() > 0.95
 
 
+@pytest.mark.parametrize("quad", [FRONT, OBLIQUE], ids=["front", "oblique"])
+def test_erase_plate_keeps_bolts_seal_and_rim(quad):
+    img, _ = scene(quad, plate_image(hardware=True))
+    before = rectify(img, quad).astype(np.float32)
+    after = rectify(plate.erase_plate(img, np.float32(quad)), quad).astype(np.float32)
+
+    def diff(x, y, r):
+        return float(np.abs(after[y - r:y + r + 1, x - r:x + r + 1] - before[y - r:y + r + 1, x - r:x + r + 1]).mean())
+
+    # 黒いボルト、金属の封印（明るい中心と暗い輪）はそのまま残る
+    assert diff(*BOLT_R, 3) < 12
+    assert diff(*SEAL_L, 9) < 12
+    # 縁のエンボスの線も残る（上辺・下辺の中央部）
+    cols = slice(int(PLATE_W * 0.4), int(PLATE_W * 0.6))
+    for y in (RIM, PLATE_H - 1 - RIM):
+        assert float(np.abs(after[y - 1:y + 2, cols] - before[y - 1:y + 2, cols]).mean()) < 15
+    # 文字は消える
+    dev = np.abs(after[int(PLATE_H * 0.55):int(PLATE_H * 0.85), int(PLATE_W * 0.12):int(PLATE_W * 0.88)] - np.array(WHITE, np.float32)).max(axis=-1)
+    assert np.percentile(dev, 99.5) < 30
+
+
 # ---------------------------------------------------------------------------
 # 保存
 # ---------------------------------------------------------------------------
@@ -166,3 +187,12 @@ def test_save_image_rejects_webp_larger_than_spec(tmp_path):
     img = np.zeros((10, plate.WEBP_MAX_SIDE + 1, 3), np.uint8)
     with pytest.raises(ValueError):
         plate.save_image(str(tmp_path / "big.webp"), img)
+
+
+@pytest.mark.parametrize(
+    "bg, expected",
+    [(WHITE, True), (GREEN, True), (YELLOW, False), ((15, 15, 15), False)],
+    ids=["white", "green", "yellow", "black"],
+)
+def test_may_have_seal_only_for_registered_vehicle_colors(bg, expected):
+    assert plate.may_have_seal(_lab(bg)) is expected

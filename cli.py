@@ -14,7 +14,7 @@ def main():
     ap.add_argument("inputs", nargs="+", help="入力画像")
     ap.add_argument("-o", "--outdir", default="output", help="出力ディレクトリ（既定: output）")
     ap.add_argument("--conf", type=float, default=0.1, help="検出スコアの下限")
-    ap.add_argument("--margin", type=float, default=3.5, help="縁として残す幅（プレート高さに対する %%）")
+    ap.add_argument("--margin", type=float, default=6, help="縁として残す幅（プレート高さに対する %%）")
     ap.add_argument("--format", choices=list(plate.SAVE_FORMATS), default="jpeg", help="保存形式（既定: jpeg）")
     ap.add_argument("--preview", action="store_true", help="検出結果を描いたプレビュー画像も保存する")
     args = ap.parse_args()

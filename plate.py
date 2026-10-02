@@ -127,27 +127,36 @@ def _to_lab(rgb: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(rgb.astype(np.float32) / 255.0, cv2.COLOR_RGB2LAB)
 
 
-def _fit_quad_to_contour(cnt: np.ndarray) -> np.ndarray | None:
-    """輪郭を4辺に分け、各辺を直線フィットして交点を四隅とする。"""
-    hull = cv2.convexHull(cnt)
-    peri = cv2.arcLength(hull, True)
-    approx = None
-    lo, hi = 0.005, 0.2
-    for _ in range(30):
-        eps = (lo + hi) / 2
-        a = cv2.approxPolyDP(hull, eps * peri, True)
-        if len(a) == 4:
-            approx = a
-            break
-        if len(a) > 4:
-            lo = eps
-        else:
-            hi = eps
-    if approx is None:
-        approx = cv2.boxPoints(cv2.minAreaRect(cnt))
-    quad = order_quad(approx)
+def _enclosing_quad(hull: np.ndarray) -> np.ndarray | None:
+    """凸包を、辺を1本ずつ取り除いて（両隣の辺を延長して）囲む四角形に縮める。
 
-    pts = cnt.reshape(-1, 2).astype(np.float32)
+    毎回、増える面積が最小の辺を取り除く。角の欠けや出っ張り（ボルトのキャップなど）に強い。
+    """
+    pts = [p.astype(np.float64) for p in hull.reshape(-1, 2)]
+    while len(pts) > 4:
+        n = len(pts)
+        best, best_i, best_x = np.inf, -1, None
+        for i in range(n):
+            a, p, q, b = pts[i - 1], pts[i], pts[(i + 1) % n], pts[(i + 2) % n]
+            x = _line_intersect((*(p - a), *a), (*(q - b), *b))
+            if x is None:
+                continue
+            # x が辺 p-q の外側（凸包の外）にあるときだけ有効
+            if np.dot(x - p, p - a) <= 0 or np.dot(x - q, q - b) <= 0:
+                continue
+            area = abs(np.cross(p - x, q - x)) / 2
+            if area < best:
+                best, best_i, best_x = area, i, x
+        if best_i < 0:
+            return None
+        i = best_i
+        pts[i] = best_x
+        del pts[(i + 1) % n]
+    return order_quad(np.array(pts, np.float32))
+
+
+def _refit_lines(quad: np.ndarray, pts: np.ndarray) -> np.ndarray | None:
+    """各辺の近くにある輪郭点に直線を当てはめ直し、交点を四隅とする。"""
     for _ in range(3):
         lines = []
         for i in range(4):
@@ -175,6 +184,65 @@ def _fit_quad_to_contour(cnt: np.ndarray) -> np.ndarray | None:
             new.append(c)
         quad = order_quad(np.array(new))
     return quad
+
+
+def _fit_quad_to_contour(cnt: np.ndarray, region: np.ndarray | None = None) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """輪郭に四角形を当てはめる。
+
+    (既定, 代替) を返す。既定は、凸包の頂点を4つに減らした四角形を初期値に、各辺を輪郭点に当てはめ直したもの。
+    領域 region がその四角形から 3% 以上はみ出すときだけ、凸包を囲む四角形などから、はみ出しが最も少ない
+    代替を選ぶ（無ければ None）。
+    """
+    hull = cv2.convexHull(cnt)
+    peri = cv2.arcLength(hull, True)
+    starts = []
+    lo, hi = 0.005, 0.2
+    for _ in range(30):
+        eps = (lo + hi) / 2
+        a = cv2.approxPolyDP(hull, eps * peri, True)
+        if len(a) == 4:
+            starts.append(order_quad(a))
+            break
+        if len(a) > 4:
+            lo = eps
+        else:
+            hi = eps
+    if not starts:
+        starts.append(order_quad(cv2.boxPoints(cv2.minAreaRect(cnt))))
+    enc = _enclosing_quad(hull)
+    if enc is not None:
+        starts.append(enc)
+
+    # 既定は、輪郭点に辺を当てはめた四角形（凸包の頂点を減らした初期値から）
+    cpts = cnt.reshape(-1, 2).astype(np.float32)
+    default = _refit_lines(starts[0], cpts)
+    if region is None:
+        return default, None
+    hull_region = np.zeros(region.shape, np.uint8)
+    cv2.fillConvexPoly(hull_region, hull.reshape(-1, 2).astype(np.int32), 1)
+    region_area = max(int(region.sum()), 1)
+
+    def coverage(q):
+        m = np.zeros(region.shape, np.uint8)
+        cv2.fillPoly(m, [np.round(q).astype(np.int32)], 1)
+        return np.logical_and(m, region).sum() / region_area, np.logical_and(m, hull_region == 0).sum() / max(int(m.sum()), 1)
+
+    if default is None or coverage(default)[0] >= 0.97:
+        return default, None
+    # 領域が四角形からはみ出している（上段の文字で領域が欠け、辺が内側へ引き込まれた）場合は、
+    # 凸包を囲む四角形や、凸包の点への当てはめも候補にし、はみ出しが最も少なく余分が小さいものを選ぶ
+    hp = hull.reshape(-1, 2).astype(np.float32)
+    hpts = np.concatenate([np.linspace(hp[i], hp[(i + 1) % len(hp)], max(2, int(np.linalg.norm(hp[(i + 1) % len(hp)] - hp[i]))), endpoint=False)
+                           for i in range(len(hp))]).astype(np.float32)
+    cands = [default] + [f(s0, p) for s0 in starts for f, p in ((_refit_lines, cpts), (_refit_lines, hpts))] + starts[1:]
+    best, best_cov = None, coverage(default)[0]
+    for q in cands:
+        if q is None:
+            continue
+        cov, extra = coverage(q)
+        if extra <= 0.06 and cov > best_cov + 0.01:
+            best, best_cov = q, cov
+    return default, best
 
 
 def _refine_edges(gray: np.ndarray, quad: np.ndarray, search: float) -> np.ndarray:
@@ -255,6 +323,27 @@ def looks_like_plate(img: np.ndarray, quad: np.ndarray) -> bool:
     ch[-10:] = 0
     ch[:, :10] = 0
     ch[:, -10:] = 0
+    if _has_big_digit(ch, rw, rh):
+        return True
+    # 映り込みなどでプレートの色味が片側だけずれると、2色の分け方が「文字/地」でなく「色味の違い」になる。
+    # 明るさが周囲（文字を消した背景）からはっきり外れる画素を文字として、もう一度確かめる
+    L = lab[..., 0]
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31))
+    dark = cv2.morphologyEx(L, cv2.MORPH_CLOSE, k) - L  # 明るい地に暗い文字
+    light = L - cv2.morphologyEx(L, cv2.MORPH_OPEN, k)  # 暗い地に明るい文字（緑・黒ナンバー）
+    for diff in (dark, light):
+        ch = (diff > max(8.0, 0.4 * float(np.percentile(diff, 99)))).astype(np.uint8)
+        ch[:10] = 0
+        ch[-10:] = 0
+        ch[:, :10] = 0
+        ch[:, -10:] = 0
+        if _has_big_digit(ch, rw, rh):
+            return True
+    return False
+
+
+def _has_big_digit(ch: np.ndarray, rw: int, rh: int) -> bool:
+    """文字マスクに、下段の大きな数字（縦長の塊）が1つ以上あるか。"""
     _, _, stats, _ = cv2.connectedComponentsWithStats(ch)
     tall = [st for st in stats[1:] if st[3] > 0.3 * rh and st[1] > 0.3 * rh and st[2] < 0.3 * rw]
     return len(tall) >= 1
@@ -268,6 +357,9 @@ def plate_colors_plausible(bg: np.ndarray, inner: np.ndarray) -> bool:
     サンプルでは本物の白・黄ナンバーの地色は日陰でも L≥40、誤検出した黒い部品は L≤16 だった。
     """
     L = inner[:, 0]
+    # 赤・ピンク・紫系の地色のナンバーは無い（白は照明で少し色づく程度）
+    if bg[1] > 12 and bg[1] > bg[2]:
+        return False
     if bg[0] >= 30:
         return True
     if bg[1] < -12 and (L > bg[0] + 20).mean() > 0.03:
@@ -297,6 +389,41 @@ def quad_shape_problem(quad: np.ndarray) -> str:
         if np.degrees(np.arccos(np.clip(cos, -1, 1))) > 15:
             return "向かい合う辺が平行でない"
     return ""
+
+
+def _rim_is_plate(lab: np.ndarray, quad: np.ndarray, bg: np.ndarray, fg: np.ndarray) -> bool:
+    """四角形の4辺それぞれの内側の細い帯が、ほぼ地色か（辺がプレートの縁に沿っているか）。
+
+    エッジに寄せただけの四角形は、車体の線などに乗って斜めにずれることがあるので、その確認に使う。
+    """
+    rw, rh = 200, 100
+    M = cv2.getPerspectiveTransform(order_quad(quad).astype(np.float32), np.float32([[0, 0], [rw, 0], [rw, rh], [0, rh]]))
+    r = cv2.warpPerspective(lab, M, (rw, rh), flags=cv2.INTER_LINEAR)
+    near = _color_dist(r, bg) < max(6.0, 0.5 * float(_color_dist(fg[None, None], bg)[0, 0]))
+    strips = (near[4:10, 10:-10], near[-10:-4, 10:-10], near[10:-10, 4:10], near[10:-10, -10:-4])
+    ratios = sorted(float(st.mean()) for st in strips)
+    # 文字が縁に近い辺や、映り込みで色味がずれた辺が1つあっても許す
+    return ratios[0] >= 0.4 and ratios[1] >= 0.6
+
+
+def _snap_box_to_edges(img: np.ndarray, box) -> np.ndarray | None:
+    """bbox の各辺を、法線方向の輝度勾配が最も強い位置へ寄せた四角形（画像座標）を返す。"""
+    H, W = img.shape[:2]
+    x1, y1, x2, y2 = [float(v) for v in box]
+    bw, bh = x2 - x1, y2 - y1
+    m = 0.3
+    cx1, cy1 = int(max(0, x1 - m * bw)), int(max(0, y1 - m * bh))
+    cx2, cy2 = int(min(W, x2 + m * bw)), int(min(H, y2 + m * bh))
+    gray = cv2.cvtColor(img[cy1:cy2, cx1:cx2], cv2.COLOR_RGB2GRAY).astype(np.float32)
+    gray = cv2.GaussianBlur(gray, (0, 0), max(0.8, bh / 150))
+    q = box_to_quad(box) - [cx1, cy1]
+    search = max(4.0, 0.12 * bh)
+    for _ in range(2):
+        r = _refine_edges(gray, q.astype(np.float32), search)
+        if np.allclose(r, q):
+            break
+        q = r
+    return (q + [cx1, cy1]).astype(np.float32)
 
 
 def refine_quad(img: np.ndarray, box, work_width: int = 360, strict: bool = True, debug: dict | None = None) -> PlateFit:
@@ -346,8 +473,20 @@ def refine_quad(img: np.ndarray, box, work_width: int = 360, strict: bool = True
             break
         first_reason = first_reason or reason
     else:
-        fail.reason = first_reason
-        return fail
+        # 日陰で車体とほぼ同じ色のプレートや、隣の車の映り込みで色味がずれたプレートは、色の領域が車体へ漏れて決まらない。
+        # 検出器の bbox を初期値に、各辺を近くの強いエッジへ寄せた四角形を、同じ妥当性チェックに掛ける
+        bg_i = int(np.argmax(counts))
+        bg, fg = centers[bg_i], centers[1 - bg_i]
+        snapped = _snap_box_to_edges(img, box)
+        q_small = None if snapped is None else ((snapped - [cx1, cy1]) * s).astype(np.float32)
+        quad = None
+        if q_small is not None and not quad_shape_problem(q_small) and _rim_is_plate(lab, q_small, bg, fg):
+            filled = np.zeros((sh, sw), np.uint8)
+            cv2.fillConvexPoly(filled, np.round(q_small).astype(np.int32), 1)
+            quad, _ = _validate_quad(lab, filled, q_small, bg, fg, strict)
+        if quad is None:
+            fail.reason = first_reason
+            return fail
 
     # --- 原寸で辺を詰める
     quad_full = quad / s + [cx1, cy1]
@@ -358,6 +497,10 @@ def refine_quad(img: np.ndarray, box, work_width: int = 360, strict: bool = True
     if not quad_shape_problem(refined):
         quad_full = refined
 
+    # 写真の端に接する（端で切れた）プレートは四隅を正しく決められないので、自動では処理しない（手動指定は可）
+    over = max(2.0, 0.01 * float(np.linalg.norm(quad_full[1] - quad_full[0])))
+    if strict and (quad_full.min() < over or (quad_full[:, 0] > W - 1 - over).any() or (quad_full[:, 1] > H - 1 - over).any()):
+        return PlateFit(quad_full.astype(np.float32), False, "写真の端で切れている")
     if strict and not looks_like_plate(img, quad_full):
         return PlateFit(quad_full.astype(np.float32), False, "ナンバーの文字配置に見えない")
 
@@ -429,7 +572,7 @@ def _extend_quad(lab: np.ndarray, quad: np.ndarray, bg: np.ndarray, fg: np.ndarr
 
     # 濃い影で上下の帯が地色と大きく違う場合: 縦横比が横長すぎるなら、上下に「外側が暗くなる」強いエッジを探し、
     # 1:2 に戻る位置まで伸ばす
-    if _apparent_aspect(quad) > PLATE_ASPECT * 1.18:
+    if _apparent_aspect(quad) > PLATE_ASPECT * 1.08:
         prof = np.median(big[:, cx, 0], axis=1)
         prof = np.convolve(prof, np.ones(3) / 3, mode="same")
         k = 3
@@ -447,14 +590,21 @@ def _extend_quad(lab: np.ndarray, quad: np.ndarray, bg: np.ndarray, fg: np.ndarr
 
         tops = [(top, np.inf)] + peaks(range(k + 1, top - 2), True)
         bots = [(bottom, np.inf)] + peaks(range(bottom + 2, len(prof) - k - 1), False)
-        best, best_score = None, err(quad)
+        best, best_score, base_err = None, np.inf, err(quad)
         for t, st in tops:
             for b, sb in bots:
                 if (t, b) == (top, bottom):
                     continue
                 cand = back(left, t, right, b)
                 e = err(cand)
-                if e < 0.12 and e < best_score - 0.1:
+                if not (e < 0.12 and e < base_err - 0.06 and e < best_score):
+                    continue
+                # 足した帯は、暗くても地色と同じ色味（影の落ちたプレート）でなければならない
+                strips = [big[t:top, cx]] if t < top else []
+                strips += [big[bottom:b, cx]] if b > bottom else []
+                ok = all(s.size and np.hypot(*(np.median(s.reshape(-1, 3)[:, 1:], axis=0) - bg[1:])) < 9
+                         and np.median(s[..., 0]) > 0.35 * bg[0] for s in strips)
+                if ok:
                     best, best_score = cand, e
         if best is not None:
             quad = best
@@ -463,7 +613,6 @@ def _extend_quad(lab: np.ndarray, quad: np.ndarray, bg: np.ndarray, fg: np.ndarr
 
 def _fit_plate_region(lab, seed, bg_samples, bg, fg, strict=True, debug=None) -> tuple[np.ndarray | None, str]:
     """地色 bg の連結領域を探して四隅をフィットし、妥当性を確認する。(quad, 失敗理由) を返す。"""
-    sh, sw = lab.shape[:2]
     # 地色クラスタのばらつきから許容距離を決める
     spread = np.percentile(_color_dist(bg_samples[None], bg)[0], 90)
     thr = float(np.clip(max(spread * 1.6, 0.35 * _color_dist(fg[None, None], bg)[0, 0]), 6, 40))
@@ -485,6 +634,12 @@ def _fit_plate_region(lab, seed, bg_samples, bg, fg, strict=True, debug=None) ->
     overlap[0] = 0
     k = int(np.argmax(overlap))
     blob = (lbl == k).astype(np.uint8)
+    return _fit_blob(lab, blob, bg, fg, strict, debug, mask)
+
+
+def _fit_blob(lab, blob, bg, fg, strict, debug, mask) -> tuple[np.ndarray | None, str]:
+    """プレート本体の領域 blob に四角形を当てはめ、妥当性を確認する。"""
+    sh, sw = lab.shape[:2]
     # エッジで切った隙間と文字の穴を埋める
     blob = cv2.morphologyEx(blob, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)))
     cnts, _ = cv2.findContours(blob, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
@@ -492,13 +647,22 @@ def _fit_plate_region(lab, seed, bg_samples, bg, fg, strict=True, debug=None) ->
     filled = np.zeros_like(blob)
     cv2.drawContours(filled, [cnt], -1, 1, -1)
 
-    quad = _fit_quad_to_contour(cnt)
+    default, alt = _fit_quad_to_contour(cnt, filled)
     if debug is not None:
-        debug.update(mask=mask, blob=filled, quad=quad, bg=bg, fg=fg, thr=thr)
+        debug.update(mask=mask, blob=filled, quad=default, bg=bg, fg=fg)
+    quad, reason = _validate_quad(lab, filled, default, bg, fg, strict)
+    if quad is None or alt is None:
+        return quad, reason
+    # 既定の四角形が妥当なときだけ代替を試す（既定で弾かれる誤検出を代替で救わないよう）
+    better, _ = _validate_quad(lab, filled, alt, bg, fg, strict)
+    return (better, "") if better is not None else (quad, "")
+
+
+def _validate_quad(lab, filled, quad, bg, fg, strict) -> tuple[np.ndarray | None, str]:
+    """当てはめた四角形がナンバーとして妥当か確認する。妥当なら端を伸ばした四角形を返す。"""
+    sh, sw = lab.shape[:2]
     if quad is None:
         return None, "四角形フィット失敗"
-
-    # --- 妥当性チェック
     qarea = cv2.contourArea(quad)
     if qarea < 100:
         return None, "領域が小さすぎます"
@@ -579,12 +743,132 @@ def _shadow_ratio(rect: np.ndarray, base: np.ndarray, rh: int) -> np.ndarray:
     return 1 - (1 - ratio) * shadow
 
 
-def erase_plate(img: np.ndarray, quad: np.ndarray, margin: float = 0.035, seed: int = 0) -> np.ndarray:
-    """四隅で指定されたプレートの文字・ボルト等を消し、無地の板にする。
+def _fill_holes(mask: np.ndarray) -> np.ndarray:
+    """各連結成分の内側の穴を埋める（金属キャップの明るい中心など）。"""
+    cnts, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    out = np.zeros(mask.shape, np.uint8)
+    cv2.drawContours(out, cnts, -1, 1, -1)
+    return out
+
+
+# プレート取付ボルトの標準位置（プレート幅・高さに対する比）。ボルト穴は上段の文字の左右にある
+BOLT_X = (0.18, 0.82)
+BOLT_Y = 0.15
+
+
+def _find_bolts(dev: np.ndarray, rect: np.ndarray | None = None, bg: np.ndarray | None = None) -> np.ndarray:
+    """正面化したプレートの「地色から外れた画素」dev から、取付ボルト（封印キャップを含む）を探してマスクで返す。
+
+    標準位置の近くにある、丸くて文字より小さい塊だけをボルトとみなす。
+    文字の一部をボルトと誤認すると文字が残るので、迷ったら採用しない。
+    """
+    rh, rw = dev.shape
+    found = np.zeros_like(dev, dtype=np.uint8)
+    y0, y1 = int(0.04 * rh), int(0.36 * rh)
+    for ex in BOLT_X:
+        x0, x1 = int((ex - 0.12) * rw), int((ex + 0.12) * rw)
+        win = cv2.morphologyEx(dev[y0:y1, x0:x1].astype(np.uint8), cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
+        win = _fill_holes(win)
+        h, w = win.shape
+        n, lbl, st, cen = cv2.connectedComponentsWithStats(win)
+        best, best_d = 0, 1.0
+        for j in range(1, n):
+            x, y, ww, hh, area = st[j]
+            if x == 0 or y == 0 or x + ww >= w or y + hh >= h:
+                continue  # 窓の外へ続く塊は文字
+            r = max(ww, hh) / 2
+            if not (0.022 * rh <= r <= 0.10 * rh):
+                continue
+            if not (0.55 <= ww / max(hh, 1) <= 1.8) or area / (np.pi * r * r) < 0.4:
+                continue
+            dx = ((cen[j][0] + x0) / rw - ex) / 0.06
+            dy = ((cen[j][1] + y0) / rh - BOLT_Y) / 0.09
+            d = dx * dx + dy * dy
+            if d < best_d:
+                best, best_d = j, d
+        if best:
+            found[y0:y1, x0:x1][lbl == best] = 1
+    if rect is not None and (bg is None or may_have_seal(bg)):
+        found |= _find_seal(rect)
+    return found
+
+
+def may_have_seal(bg: np.ndarray) -> bool:
+    """地色 bg (Lab) のナンバーに封印が付きうるか。
+
+    封印は登録自動車（白・緑ナンバー）の後部だけに付き、軽自動車（黄・黒ナンバー）には無い（doc/License_plate_jp.md 5 章）。
+    前後の区別は画像からはできないので、白・緑なら探す。
+    """
+    yellow = bg[2] > 25
+    dark = bg[0] < 35 and bg[1] > -12  # 黒地（緑地は a が負なので除く）
+    return not (yellow or dark)
+
+
+def _find_seal(rect: np.ndarray) -> np.ndarray:
+    """後部の白・緑ナンバーの左ボルトに付く封印（金属キャップ）を円として探し、円板のマスクで返す。
+
+    封印は右のボルトより大きく、明るい金属で、上段の文字に接していることが多いので、
+    色の塊ではなく円の輪郭で探す。位置は左ボルトの標準位置に限る（文字の丸い部分を拾わないよう）。
+    """
+    rh, rw = rect.shape[:2]
+    g = cv2.GaussianBlur(cv2.cvtColor(rect.astype(np.uint8), cv2.COLOR_RGB2GRAY), (0, 0), max(0.8, rh * 0.006))
+    x0, x1, y1 = int(0.05 * rw), int(0.33 * rw), int(0.36 * rh)
+    cs = cv2.HoughCircles(g[:y1, x0:x1], cv2.HOUGH_GRADIENT, dp=1, minDist=rh, param1=80, param2=14,
+                          minRadius=max(2, int(0.045 * rh)), maxRadius=int(0.13 * rh))
+    mask = np.zeros((rh, rw), np.uint8)
+    if cs is None:
+        return mask
+    cx, cy, r = cs[0][0]
+    cx += x0
+    if 0.11 <= cx / rw <= 0.23 and 0.05 <= cy / rh <= 0.21:
+        cv2.circle(mask, (int(round(cx)), int(round(cy))), int(round(r * 1.1)), 1, -1)
+    return mask
+
+
+def _keep_mask(dev: np.ndarray, band: int, bolts: np.ndarray, textlike: np.ndarray) -> np.ndarray:
+    """元画像のまま残す部分（縁のエンボス、枠・クリップ、ボルト）のマスクを返す。
+
+    - 縁の帯の中で辺に沿って長く続く線（エンボスの陰影・プレートの縁）
+    - 帯の中にほぼ収まり、プレートの外周に接する塊（ナンバー枠のクリップなど）
+    - ボルト
+    文字は外周に接しないので、帯にはみ出していても残らない。
+    縁の陰影の帯に文字が重なることがあるので、文字色の画素 textlike は縁・クリップとしては残さない。
+    """
+    rh, rw = dev.shape
+    d = dev.astype(np.uint8)
+    # 縁の線はプレートの辺のほぼ全長にわたる。文字の画（数字の縦線など）より十分長いものだけを線とみなす
+    zone = band + 2
+    lines = np.zeros_like(d)
+    lh = cv2.morphologyEx(d, cv2.MORPH_OPEN, np.ones((1, max(5, int(rw * 0.35))), np.uint8))
+    lv = cv2.morphologyEx(d, cv2.MORPH_OPEN, np.ones((max(5, int(rh * 0.6)), 1), np.uint8))
+    # エンボスの陰影は細い線。太い帯（縁から落ちる影など）は影として扱い、ここでは残さない
+    t = max(3, int(rh * 0.05))
+    lh &= 1 - cv2.morphologyEx(lh, cv2.MORPH_OPEN, np.ones((t, 1), np.uint8))
+    lv &= 1 - cv2.morphologyEx(lv, cv2.MORPH_OPEN, np.ones((1, t), np.uint8))
+    lines[:zone] |= lh[:zone]
+    lines[-zone:] |= lh[-zone:]
+    lines[:, :zone] |= lv[:, :zone]
+    lines[:, -zone:] |= lv[:, -zone:]
+
+    inband = np.ones_like(d)
+    inband[band:rh - band, band:rw - band] = 0
+    n, lbl, st, _ = cv2.connectedComponentsWithStats(d & (1 - lines))
+    edge = 2
+    x, y, w, h, area = st[:, 0], st[:, 1], st[:, 2], st[:, 3], st[:, 4]
+    touches = (x <= edge) | (y <= edge) | (x + w >= rw - edge) | (y + h >= rh - edge)
+    in_band_area = np.bincount(lbl.ravel(), weights=inband.ravel(), minlength=n)
+    hardware = touches & (in_band_area >= 0.7 * np.maximum(area, 1))
+    hardware[0] = False
+    return (((lines | hardware[lbl].astype(np.uint8)) & (1 - textlike.astype(np.uint8))) | bolts).astype(np.uint8)
+
+
+def erase_plate(img: np.ndarray, quad: np.ndarray, margin: float = 0.06, seed: int = 0, debug: dict | None = None) -> np.ndarray:
+    """四隅で指定されたプレートの文字を消し、無地の板にする。
 
     プレートを正面化し、文字を除いた地色画素から照明ムラを含む滑らかな地色面を推定、
     元画像相当の粒状ノイズを乗せて内側を置き換え、逆射影で合成する。
-    バンパーなどの影は残す。縁の帯 (margin) は元画像を残し、そこにかかった文字だけを置き換える。
+    取付ボルト・縁のエンボス・枠のクリップ・バンパーなどの影は残す。
+    縁の帯 (margin) は元画像を残し、内側から続く文字だけを置き換える。
     """
     quad = order_quad(quad)
     out = img.copy()
@@ -610,9 +894,14 @@ def erase_plate(img: np.ndarray, quad: np.ndarray, margin: float = 0.035, seed: 
     # 地色面の推定（初回は地色との距離、以降は推定面との残差で文字マスクを更新）
     sigma = rh * 0.13
     bgmask = _color_dist(lab, bg, 0.35) < thr * 1.5
+    # 縁の帯は地色面の推定に使わない（縁の陰影や、縁に接した文字の輪郭が混ざり、塗った部分に文字の跡が出るため）。
+    # 帯の地色は内側から補間する
+    eb = max(2, int(round(rh * margin)))
+    inner_zone = np.zeros((rh, rw), bool)
+    inner_zone[eb:rh - eb, eb:rw - eb] = True
     for _ in range(3):
         k = max(3, int(rh * 0.04) | 1)
-        bgmask_e = cv2.erode(bgmask.astype(np.uint8), np.ones((k, k), np.uint8)) > 0
+        bgmask_e = (cv2.erode(bgmask.astype(np.uint8), np.ones((k, k), np.uint8)) > 0) & inner_zone
         surface = _normalized_blur(lab, bgmask_e, sigma)
         d = lab - surface
         d[..., 0] *= 0.6
@@ -638,20 +927,30 @@ def erase_plate(img: np.ndarray, quad: np.ndarray, margin: float = 0.035, seed: 
     base = cv2.cvtColor(surface.astype(np.float32), cv2.COLOR_LAB2RGB) * 255
     synth = np.clip(synth * 255 * _shadow_ratio(rect.astype(np.float32), base, rh), 0, 255)
 
-    # 合成マスク: 内側はすべて置き換え、縁の帯は文字（地色から外れた画素）のみ
-    m = int(round(rh * margin))
-    alpha = np.zeros((rh, rw), np.float32)
-    alpha[m:rh - m, m:rw - m] = 1.0
+    # 合成マスク: 内側はすべて置き換え、縁の帯は内側から続く文字だけ。残すもの（ボルト・縁・クリップ）は除く
+    dev = ~bgmask
+    band = max(2, int(round(rh * margin)))
+    bolts = _find_bolts(dev, rect, bg)
+    textlike = _color_dist(lab, fg, 0.6) < 0.4 * float(_color_dist(fg[None, None], bg, 0.6)[0, 0])
+    keep = _keep_mask(dev, band, bolts, textlike)
     feather = max(1.0, rh * 0.012)
-    alpha = cv2.GaussianBlur(alpha, (0, 0), feather)
-    charmask = (~bgmask).astype(np.uint8)
-    charmask[: max(1, m // 3)] = 0
-    charmask[-max(1, m // 3):] = 0
-    charmask[:, : max(1, m // 3)] = 0
-    charmask[:, -max(1, m // 3):] = 0
-    charmask = cv2.dilate(charmask, np.ones((3, 3), np.uint8), iterations=2).astype(np.float32)
-    charmask = cv2.GaussianBlur(charmask, (0, 0), feather * 0.7)
-    alpha = np.maximum(alpha, charmask)
+    interior = np.zeros((rh, rw), np.uint8)
+    interior[band:rh - band, band:rw - band] = 1
+    # 内側に掛かる「地色から外れた塊」= 文字（帯にはみ出した部分も含めて消す）
+    text_src = cv2.dilate((dev & (keep == 0)).astype(np.uint8), np.ones((3, 3), np.uint8))
+    n, lbl, _, _ = cv2.connectedComponentsWithStats(text_src)
+    hit = np.zeros(n, bool)
+    hit[np.unique(lbl[(interior > 0) & (text_src > 0)])] = True
+    hit[0] = False
+    text = cv2.dilate(hit[lbl].astype(np.uint8), np.ones((3, 3), np.uint8), iterations=2)
+    alpha = cv2.GaussianBlur(interior.astype(np.float32), (0, 0), feather)
+    pad = max(1, int(round(rh * 0.015)))
+    keep_soft = cv2.GaussianBlur(cv2.dilate(keep, np.ones((2 * pad + 1, 2 * pad + 1), np.uint8)).astype(np.float32), (0, 0), feather * 0.7)
+    # 残す部分の周りは塗らない。ただし文字は、縁に接していても必ず塗る（残すのは縁そのものだけ）
+    text_soft = cv2.GaussianBlur(text.astype(np.float32), (0, 0), feather * 0.7) * (1 - keep)
+    alpha = np.maximum(alpha * (1 - keep_soft), text_soft)
+    if debug is not None:
+        debug.update(rect=rect, dev=dev, bolts=bolts, keep=keep, text=text, alpha=alpha, band=band)
 
     # 逆射影して合成（プレート周辺の矩形領域だけ処理）
     Minv = np.linalg.inv(M)
@@ -743,7 +1042,7 @@ def find_plates(img: np.ndarray, conf: float = 0.1) -> list[PlateCandidate]:
     return kept
 
 
-def erase_all(img: np.ndarray, quads: list[np.ndarray], margin: float = 0.035) -> np.ndarray:
+def erase_all(img: np.ndarray, quads: list[np.ndarray], margin: float = 0.06) -> np.ndarray:
     out = img
     for q in quads:
         out = erase_plate(out, q, margin=margin)

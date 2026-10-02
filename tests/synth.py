@@ -14,11 +14,27 @@ DARK_TEXT = (25, 50, 35)
 WHITE_TEXT = (240, 240, 240)
 
 
-def plate_image(bg=WHITE, text=DARK_TEXT, shadow: float = 0.0) -> np.ndarray:
-    """正面から見たプレート (RGB)。shadow > 0 なら上部にその濃さの横帯の影を落とす。"""
+# 取付ボルト・封印・縁のエンボスの位置（正面化した座標）
+BOLT_R = (int(PLATE_W * 0.82), int(PLATE_H * 0.15))
+SEAL_L = (int(PLATE_W * 0.17), int(PLATE_H * 0.14))
+RIM = 5  # 縁のエンボスの線の、外周からの距離
+
+
+def plate_image(bg=WHITE, text=DARK_TEXT, shadow: float = 0.0, hardware: bool = False) -> np.ndarray:
+    """正面から見たプレート (RGB)。
+
+    shadow > 0 なら上部にその濃さの横帯の影を落とす。
+    hardware なら、右に黒いボルト、左に金属の封印、外周に沿ってエンボスの細い線を描く。
+    """
     img = np.full((PLATE_H, PLATE_W, 3), bg, np.uint8)
+    if hardware:
+        rim = tuple(int(c * 0.72) for c in bg)
+        cv2.rectangle(img, (RIM, RIM), (PLATE_W - 1 - RIM, PLATE_H - 1 - RIM), rim, 2, cv2.LINE_AA)
+        cv2.circle(img, BOLT_R, 6, (25, 25, 25), -1, cv2.LINE_AA)
+        cv2.circle(img, SEAL_L, 13, (90, 90, 95), -1, cv2.LINE_AA)
+        cv2.circle(img, SEAL_L, 10, (205, 208, 212), -1, cv2.LINE_AA)
     # 上段（地名・分類番号）と、下段の大きな数字
-    cv2.putText(img, "ABC 330", (95, 48), cv2.FONT_HERSHEY_SIMPLEX, 1.1, text, 3, cv2.LINE_AA)
+    cv2.putText(img, "ABC 330", (100, 48), cv2.FONT_HERSHEY_SIMPLEX, 1.0, text, 3, cv2.LINE_AA)
     cv2.putText(img, "12-34", (30, 145), cv2.FONT_HERSHEY_SIMPLEX, 3.2, text, 10, cv2.LINE_AA)
     if shadow:
         f = np.ones((PLATE_H, 1, 1), np.float32)

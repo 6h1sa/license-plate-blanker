@@ -157,7 +157,7 @@ with gr.Blocks(title="ナンバープレート消去") as demo:
             remove_btn = gr.Button("チェックを外した候補を削除", size="sm")
             mode = gr.Radio([MODE_BOX, MODE_QUAD], value=MODE_BOX, label="手動追加の方法（プレビューをクリック）")
             clear_btn = gr.Button("クリック点をリセット", size="sm")
-            margin = gr.Slider(0, 8, value=3.5, step=0.5, label="縁として残す幅（プレート高さに対する %）")
+            margin = gr.Slider(0, 10, value=6, step=0.5, label="縁として残す幅（プレート高さに対する %）")
             fmt = gr.Radio(list(FORMATS), value="JPEG", label="保存形式")
             erase_btn = gr.Button("文字を消去", variant="primary")
         with gr.Column(scale=2):
