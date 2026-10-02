@@ -15,3 +15,5 @@ sample_picture/
 output/
 review/
 .regression/
+web/node_modules/
+web/dist/

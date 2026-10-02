@@ -7,7 +7,6 @@ license = "AGPL-3.0-only"
 license-files = ["LICENSE"]
 requires-python = ">=3.14"
 dependencies = [
-    "gradio>=6.14.0",
     "huggingface-hub>=1.15.0",
     "numpy>=2.4.6",
     "opencv-python>=4.13.0.92",
