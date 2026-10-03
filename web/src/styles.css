@@ -89,7 +89,8 @@ h2:first-child { margin-top: 0; }
 
 /* 表示 */
 .stage { position: relative; overflow: hidden; }
-.viewer { display: block; width: 100%; height: 100%; }
+/* 指の操作はすべて自前で扱う（ブラウザのスクロールや拡大をさせない） */
+.viewer { display: block; width: 100%; height: 100%; touch-action: none; }
 .drop {
   position: absolute;
   inset: 0;
@@ -112,9 +113,16 @@ h2:first-child { margin-top: 0; }
   bottom: 12px;
   transform: translateX(-50%);
   background: #000c;
-  padding: 6px 12px;
+  padding: 6px 8px 6px 12px;
   border-radius: 6px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  /* 左端を中央に置くと、そのままでは幅が半分に縮むので、中身の幅を使う */
+  width: max-content;
+  max-width: calc(100% - 24px);
 }
+.hint button { flex: none; }
 
 /* 右側 */
 .side { border-left: 1px solid var(--line); padding: 10px 12px; }
@@ -130,3 +138,74 @@ h2:first-child { margin-top: 0; }
 .crop { width: 100%; height: 56px; background: #0f1012; border-radius: 3px; }
 input[type="range"] { width: 100%; }
 .keys div { color: var(--muted); }
+
+/* ---------------------------------------------------------------- 狭い画面（スマホなど） */
+/* アドレスバーの出入りで高さが変わっても写真が隠れないよう、dvh を使う */
+.app.narrow {
+  height: 100dvh;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  grid-template-areas: "header" "stage" "tabs" "sheet";
+}
+.app.narrow header { grid-area: header; }
+.app.narrow .stage { grid-area: stage; }
+.app.narrow .tabs { grid-area: tabs; }
+.app.narrow .sheet { grid-area: sheet; }
+/* 横向きのスマホ: 高さが足りないので、タブとパネルは写真の右に置く */
+@media (orientation: landscape) and (max-height: 500px) {
+  .app.narrow {
+    grid-template-columns: minmax(0, 1fr) min(320px, 42vw);
+    grid-template-rows: auto auto minmax(0, 1fr);
+    grid-template-areas: "header header" "stage tabs" "stage sheet";
+  }
+  .app.narrow .tabs { border-top: 0; border-left: 1px solid var(--line); }
+  .app.narrow .sheet { max-height: none; border-top: 0; border-left: 1px solid var(--line); }
+}
+.app.narrow header {
+  gap: 6px;
+  padding: 6px 8px;
+  min-height: 52px;
+}
+.app.narrow .stage { min-height: 0; }
+/* 表示の切り替え。左上の表示（処理前・拡大率）と反対の右上に、小さめに置く */
+.floating { position: absolute; right: 8px; top: 8px; background: #000a; padding: 3px; border-radius: 8px; }
+.floating button { min-height: 34px; padding: 4px 10px; }
+.tabs {
+  display: flex;
+  gap: 6px;
+  padding: 6px 8px;
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+}
+.tabs button { flex: 1; }
+.tabs .close { flex: none; }
+.sheet {
+  max-height: 42dvh;
+  overflow: auto;
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+.sheet-body { padding: 8px 12px 12px; }
+.sheet .crop { height: 64px; }
+
+/* ---------------------------------------------------------------- 指で操作する端末 */
+@media (pointer: coarse) {
+  button, select { min-height: 40px; padding: 6px 12px; }
+  .plate-head input[type="checkbox"] { width: 22px; height: 22px; }
+  .plate-head button { min-height: 32px; padding: 2px 10px; }
+  .file { padding: 10px 12px; }
+  .file .remove { visibility: visible; min-height: 32px; }
+  input[type="range"] { height: 32px; }
+}
+/* 狭い画面では、表示の切り替えは右上のボタンで分かるので、左上には処理の状態だけを出す */
+.app.narrow .badge .mode, .app.narrow .badge .zoom { display: none; }
+
+/* 長押しや角のドラッグで、文字の選択や iOS の長押しメニュー（コピー・調べる）が出ないようにする。
+   このアプリには選んでコピーしたい文字は無い */
+.app {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}

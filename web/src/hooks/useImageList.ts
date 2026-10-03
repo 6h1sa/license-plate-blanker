@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
-import { listImages } from "../api";
+import { eventsUrl, listImages } from "../api";
 import type { ImageSummary } from "../types";
 
-const POLL_MS = 1000;
-
-/** 読み込んだ写真の一覧。裏の処理の進み具合を知るため、定期的に取り直す。 */
+/**
+ * 読み込んだ写真の一覧。
+ *
+ * 定期的には問い合わせず、サーバーが状態の変化を知らせてきたとき（/api/events）だけ取り直す。
+ * 接続が切れても EventSource が自動でつなぎ直し、つながった直後の通知で最新になる。
+ */
 export function useImageList() {
   const [files, setFiles] = useState<ImageSummary[]>([]);
 
@@ -12,14 +15,14 @@ export function useImageList() {
     try {
       setFiles(await listImages());
     } catch {
-      // サーバーが一時的に応答しなくても、次の取得で回復する
+      // サーバーが一時的に応答しなくても、次の通知で回復する
     }
   }, []);
 
   useEffect(() => {
-    refresh();
-    const timer = setInterval(refresh, POLL_MS);
-    return () => clearInterval(timer);
+    const events = new EventSource(eventsUrl());
+    events.onmessage = () => refresh();
+    return () => events.close();
   }, [refresh]);
 
   return { files, refresh };

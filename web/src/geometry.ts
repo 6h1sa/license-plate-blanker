@@ -61,3 +61,16 @@ export function cornerAt(q: Quad, v: View, sp: Point, radius: number): number {
 export function boxFrom(a: Point, b: Point): [number, number, number, number] {
   return [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[0], b[0]), Math.max(a[1], b[1])];
 }
+
+/**
+ * 2 本指の拡大縮小と移動。指を置いたときの表示 origin・2 本の中点 startMid・間隔 startDist から、
+ * 今の中点 mid・間隔 dist に合わせた表示を返す（指の下にあった画像の点が、指の下に付いてくる）。
+ */
+export function pinchView(origin: View, startMid: Point, startDist: number, mid: Point, dist: number): View {
+  const s = origin.s * (dist / Math.max(startDist, 1));
+  const [ix, iy] = toImage(origin, startMid);
+  return { s, ox: mid[0] - ix * s, oy: mid[1] - iy * s };
+}
+
+export const midpoint = (a: Point, b: Point): Point => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+export const distance = (a: Point, b: Point): number => Math.hypot(a[0] - b[0], a[1] - b[1]);

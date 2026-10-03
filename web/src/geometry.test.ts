@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { boxFrom, cornerAt, fitView, pointInQuad, toImage, toScreen, zoomAt, zoomToQuad } from "./geometry";
+import { boxFrom, cornerAt, fitView, pinchView, pointInQuad, toImage, toScreen, zoomAt, zoomToQuad } from "./geometry";
 import type { Quad } from "./types";
 
 const quad: Quad = [[100, 100], [300, 110], [295, 210], [105, 200]];
@@ -29,6 +29,24 @@ describe("座標の変換", () => {
     const [x, y] = toScreen(v, [200, 155]);
     expect(x).toBeCloseTo(500);
     expect(y).toBeCloseTo(400);
+  });
+});
+
+describe("2 本指の操作", () => {
+  it("指を広げると拡大し、指の間にあった画像の点は指の中点に付いてくる", () => {
+    const v = { s: 0.5, ox: 10, oy: 20 };
+    const startMid: [number, number] = [200, 150];
+    const before = toImage(v, startMid);
+    const p = pinchView(v, startMid, 100, [260, 180], 200);
+    expect(p.s).toBeCloseTo(1);
+    const [x, y] = toScreen(p, before);
+    expect(x).toBeCloseTo(260);
+    expect(y).toBeCloseTo(180);
+  });
+
+  it("間隔が同じなら移動だけになる", () => {
+    const v = { s: 2, ox: 0, oy: 0 };
+    expect(pinchView(v, [100, 100], 50, [130, 90], 50)).toEqual({ s: 2, ox: 30, oy: -10 });
   });
 });
 

@@ -2,8 +2,18 @@
 
 import type { ImageDetail, ImageSummary, Plate, Quad, SaveFormat } from "./types";
 
+/**
+ * このページのセッションの番号。ページを開くたびに新しく作るので、再読み込みや別の端末ではまっさらな状態になる。
+ * サーバーは写真をこの番号ごとに分けて持ち、ページの接続が切れたら消す。
+ * crypto.randomUUID は http の LAN（iPhone の Safari など）では使えないので getRandomValues で作る。
+ */
+const SESSION = Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
+
+/** URL にセッションの番号を付ける。 */
+const withSession = (path: string) => `${path}${path.includes("?") ? "&" : "?"}s=${SESSION}`;
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, init);
+  const res = await fetch(withSession(path), init);
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error ?? res.statusText);
@@ -39,12 +49,15 @@ export const refineBox = (id: string, box: [number, number, number, number]) =>
   });
 
 /** 表示用の画像の URL。結果は版をクエリに入れて、古い画像がキャッシュされないようにする。 */
-export const viewUrl = (id: string) => `/img/${id}/view`;
-export const resultUrl = (id: string, version: number) => `/img/${id}/result?v=${version}`;
+export const viewUrl = (id: string) => withSession(`/img/${id}/view`);
+export const resultUrl = (id: string, version: number) => withSession(`/img/${id}/result?v=${version}`);
+
+/** 状態の変化の通知（Server-Sent Events）。つながっている間、このページの写真はサーバーに残る。 */
+export const eventsUrl = () => withSession("/api/events");
 
 /** 元の解像度で消去したファイル（target が "all" なら ZIP）を取得する。 */
 export async function download(target: string, format: SaveFormat): Promise<{ blob: Blob; name: string }> {
-  const res = await fetch(`/api/download/${target}?format=${format}`);
+  const res = await fetch(withSession(`/api/download/${target}?format=${format}`));
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error ?? res.statusText);
