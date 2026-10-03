@@ -1,0 +1,14 @@
+.git
+.venv
+.claude
+.pytest_cache
+.regression
+**/__pycache__
+*.log
+sample_picture
+output
+review
+doc
+tests
+web/node_modules
+web/dist

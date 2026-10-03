@@ -15,6 +15,7 @@ import json
 import os
 import queue
 import shutil
+import signal
 import tempfile
 import threading
 import time
@@ -320,12 +321,16 @@ def make_handler(store: Store):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--host", default="127.0.0.1", help="待ち受けるアドレス（Docker では 0.0.0.0）")
     ap.add_argument("--port", type=int, default=7900)
     args = ap.parse_args()
     root = tempfile.mkdtemp(prefix="noplate_")
+    # docker stop などの停止要求（SIGTERM）も Ctrl+C と同じく受けて、一時フォルダを片付けて終わる。
+    # コンテナでは最初のプロセスになるので、受けないと無視されて 10 秒後に強制終了される
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
     print(f"http://127.0.0.1:{args.port} を開いてください（Ctrl+C で終了）")
     try:
-        ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(Store(root))).serve_forever()
+        ThreadingHTTPServer((args.host, args.port), make_handler(Store(root))).serve_forever()
     except KeyboardInterrupt:
         pass
     finally:

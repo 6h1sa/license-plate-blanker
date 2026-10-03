@@ -10,7 +10,7 @@ dependencies = [
     "huggingface-hub>=1.15.0",
     "numpy>=2.4.6",
     "onnxruntime>=1.30.0",
-    "opencv-python>=4.13.0.92",
+    "opencv-python-headless>=4.13.0.92,<5",
     "pillow>=12.2.0",
 ]
 

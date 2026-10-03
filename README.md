@@ -8,6 +8,17 @@ uv run app.py                       # Web UI (http://127.0.0.1:7900)
 uv run cli.py 写真/*.jpg -o output  # 一括処理（--preview で検出結果画像も保存）
 ```
 
+Docker で動かす場合（Node.js も uv も不要。検出モデルはイメージに含まれます）:
+
+```bash
+docker build -t plate-blanker .
+docker run --rm -p 7900:7900 plate-blanker              # Web UI (http://127.0.0.1:7900)
+docker run --rm -v "$PWD/photos:/data" plate-blanker sh -c "python cli.py /data/*.jpg -o /data/output"
+```
+
+Windows では Docker Desktop で同じコマンドが使えます。PowerShell では `$PWD` を `${PWD}` に置き換えてください。
+検出は CPU（onnxruntime）で動くので、GPU の設定は不要です。
+
 Web UI では、写真をドラッグ&ドロップする（複数可）と、検出から消去まで自動で進みます。
 
 - **確認**: ホイールで拡大し、<kbd>Space</kbd> で処理前と処理後を切り替えます。右側にはナンバーごとの処理前・処理後が並びます
